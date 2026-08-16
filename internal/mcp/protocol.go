@@ -24,9 +24,40 @@ type JSONRPCError struct {
 	Message string `json:"message"`
 }
 
+// InitializeParams contains the capabilities and protocol version offered by a client.
+type InitializeParams struct {
+	ProtocolVersion string         `json:"protocolVersion"`
+	Capabilities    map[string]any `json:"capabilities"`
+	ClientInfo      ClientInfo     `json:"clientInfo"`
+}
+
+// ClientInfo identifies the MCP client.
+type ClientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// InitializeResult describes the gateway capabilities negotiated with the client.
+type InitializeResult struct {
+	ProtocolVersion string         `json:"protocolVersion"`
+	Capabilities    map[string]any `json:"capabilities"`
+	ServerInfo      ServerInfo     `json:"serverInfo"`
+}
+
+// ServerInfo identifies the gateway as an MCP server endpoint.
+type ServerInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
 const (
-	InvalidRequest  = -32600
-	MethodNotFound  = -32601
-	InvalidParams   = -32602
-	InternalError   = -32603
+	InvalidRequest = -32600
+	MethodNotFound = -32601
+	InvalidParams  = -32602
+	InternalError  = -32603
+)
+
+const (
+	InitializeMethod       = "initialize"
+	InitializedNotification = "notifications/initialized"
 )
