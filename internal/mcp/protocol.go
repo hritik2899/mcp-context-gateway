@@ -2,7 +2,6 @@ package mcp
 
 import "encoding/json"
 
-// JSONRPCRequest is the transport-level envelope used by MCP.
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -10,7 +9,6 @@ type JSONRPCRequest struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-// JSONRPCResponse is returned for requests that expect a response.
 type JSONRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -18,36 +16,46 @@ type JSONRPCResponse struct {
 	Error   *JSONRPCError   `json:"error,omitempty"`
 }
 
-// JSONRPCError represents a protocol-level failure.
 type JSONRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
 
-// InitializeParams contains the capabilities and protocol version offered by a client.
 type InitializeParams struct {
 	ProtocolVersion string         `json:"protocolVersion"`
 	Capabilities    map[string]any `json:"capabilities"`
 	ClientInfo      ClientInfo     `json:"clientInfo"`
 }
 
-// ClientInfo identifies the MCP client.
 type ClientInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 
-// InitializeResult describes the gateway capabilities negotiated with the client.
 type InitializeResult struct {
 	ProtocolVersion string         `json:"protocolVersion"`
 	Capabilities    map[string]any `json:"capabilities"`
 	ServerInfo      ServerInfo     `json:"serverInfo"`
 }
 
-// ServerInfo identifies the gateway as an MCP server endpoint.
 type ServerInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+}
+
+type CallToolParams struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+}
+
+type CallToolResult struct {
+	Content []ContentBlock `json:"content"`
+	IsError bool           `json:"isError,omitempty"`
+}
+
+type ContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
 }
 
 const (
@@ -58,6 +66,7 @@ const (
 )
 
 const (
-	InitializeMethod       = "initialize"
+	InitializeMethod        = "initialize"
 	InitializedNotification = "notifications/initialized"
+	ToolsCallMethod         = "tools/call"
 )
