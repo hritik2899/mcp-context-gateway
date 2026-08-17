@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -40,6 +41,14 @@ func (r *Registry) Register(definition Definition) error {
 	return nil
 }
 
+func (r *Registry) Lookup(name string) (Definition, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	definition, ok := r.tools[name]
+	return definition, ok
+}
+
 func (r *Registry) List() []Definition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -48,5 +57,8 @@ func (r *Registry) List() []Definition {
 	for _, definition := range r.tools {
 		definitions = append(definitions, definition)
 	}
+	sort.Slice(definitions, func(i, j int) bool {
+		return definitions[i].Name < definitions[j].Name
+	})
 	return definitions
 }
