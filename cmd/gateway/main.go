@@ -27,7 +27,13 @@ func main() {
 		return map[string]any{"status": "ok"}, nil
 	})
 
-	executionRouter := router.New(executor)
+	routes := router.NewRouteRegistry()
+	if err := routes.Register(router.ToolRoute{ToolName: "health.check", Backend: router.BackendLocal}); err != nil {
+		log.Fatal(err)
+	}
+
+	servers := router.NewServerRegistry()
+	executionRouter := router.New(executor, routes, servers)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -77,11 +83,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request, registry *tools.Registry,
 }
 
 func handleToolsList(w http.ResponseWriter, request mcp.JSONRPCRequest, registry *tools.Registry) {
-	writeJSON(w, mcp.JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      request.ID,
-		Result:  map[string]any{"tools": registry.List()},
-	})
+	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{"tools": registry.List()}})
 }
 
 func handleToolCall(w http.ResponseWriter, r *http.Request, request mcp.JSONRPCRequest, executionRouter router.Route) {
@@ -102,11 +104,7 @@ func handleToolCall(w http.ResponseWriter, r *http.Request, request mcp.JSONRPCR
 		content = map[string]any{"result": result}
 	}
 	text, _ := json.Marshal(content)
-	writeJSON(w, mcp.JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      request.ID,
-		Result:  mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: string(text)}}},
-	})
+	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: string(text)}}}})
 }
 
 func handleInitialize(w http.ResponseWriter, request mcp.JSONRPCRequest, registry *tools.Registry) {
@@ -124,11 +122,7 @@ func handleInitialize(w http.ResponseWriter, request mcp.JSONRPCRequest, registr
 	if len(registry.List()) > 0 {
 		capabilities["tools"] = map[string]any{}
 	}
-	result := mcp.InitializeResult{
-		ProtocolVersion: params.ProtocolVersion,
-		Capabilities:    capabilities,
-		ServerInfo:      mcp.ServerInfo{Name: "mcp-context-gateway", Version: serverVersion},
-	}
+	result := mcp.InitializeResult{ProtocolVersion: params.ProtocolVersion, Capabilities: capabilities, ServerInfo: mcp.ServerInfo{Name: "mcp-context-gateway", Version: serverVersion}}
 	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
 }
 
