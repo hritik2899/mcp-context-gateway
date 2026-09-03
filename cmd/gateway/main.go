@@ -34,6 +34,7 @@ func main() {
 
 	servers := router.NewServerRegistry()
 	executionRouter := router.New(executor, routes, servers)
+	catalog := router.NewCatalog(registry, router.NewDiscovery(servers))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +42,7 @@ func main() {
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
 	mux.HandleFunc("POST /mcp", func(w http.ResponseWriter, r *http.Request) {
-		handleMCP(w, r, registry, executionRouter)
+		handleMCP(w, r, registry, catalog, executionRouter)
 	})
 
 	server := &http.Server{Addr: ":8080", Handler: mux}
@@ -49,7 +50,7 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-func handleMCP(w http.ResponseWriter, r *http.Request, registry *tools.Registry, executionRouter router.Route) {
+func handleMCP(w http.ResponseWriter, r *http.Request, registry *tools.Registry, catalog *router.Catalog, executionRouter router.Route) {
 	var request mcp.JSONRPCRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeJSONRPCError(w, nil, mcp.InvalidRequest, "invalid JSON-RPC request")
@@ -66,7 +67,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request, registry *tools.Registry,
 	case mcp.InitializedNotification:
 		w.WriteHeader(http.StatusAccepted)
 	case mcp.ToolsListMethod:
-		handleToolsList(w, request, registry)
+		handleToolsList(w, r.Context(), request, catalog)
 	case mcp.ToolsCallMethod:
 		handleToolCall(w, r, request, executionRouter)
 	default:
@@ -82,8 +83,13 @@ func handleMCP(w http.ResponseWriter, r *http.Request, registry *tools.Registry,
 	}
 }
 
-func handleToolsList(w http.ResponseWriter, request mcp.JSONRPCRequest, registry *tools.Registry) {
-	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{"tools": registry.List()}})
+func handleToolsList(w http.ResponseWriter, ctx context.Context, request mcp.JSONRPCRequest, catalog *router.Catalog) {
+	tools, err := catalog.List(ctx)
+	if err != nil {
+		writeJSONRPCError(w, request.ID, mcp.InternalError, err.Error())
+		return
+	}
+	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: mcp.ToolsListResult{Tools: tools}})
 }
 
 func handleToolCall(w http.ResponseWriter, r *http.Request, request mcp.JSONRPCRequest, executionRouter router.Route) {
