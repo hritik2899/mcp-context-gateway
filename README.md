@@ -272,7 +272,7 @@ The structure will evolve as the context engine, policy, resilience, and observa
 
 Requirements:
 
-- Go 1.22+
+- Go 1.24+
 
 Start the gateway:
 
