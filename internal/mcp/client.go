@@ -63,14 +63,13 @@ func (c *HTTPClient) CallTool(ctx context.Context, name string, arguments map[st
 		return CallToolResult{}, fmt.Errorf("downstream MCP error %d: %s", rpcResponse.Error.Code, rpcResponse.Error.Message)
 	}
 
-	result, ok := rpcResponse.Result.(map[string]any)
-	if !ok {
-		return CallToolResult{}, fmt.Errorf("downstream response has invalid result")
-	}
-	encoded, err := json.Marshal(result)
+	encoded, err := json.Marshal(rpcResponse.Result)
 	if err != nil {
-		return CallToolResult{}, fmt.Errorf("encode downstream result: %w", err)
+		return CallToolResult{}, err
 	}
-
-	return CallToolResult{Content: []ContentBlock{{Type: "text", Text: string(encoded)}}}, nil
+	var result CallToolResult
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return CallToolResult{}, err
+	}
+	return result, nil
 }

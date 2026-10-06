@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hritik2899/mcp-context-gateway/internal/mcp"
 	"github.com/hritik2899/mcp-context-gateway/internal/tools"
 )
 
@@ -30,7 +31,7 @@ func (r *Router) Execute(ctx context.Context, name string, arguments map[string]
 
 	route, ok := r.routes.Lookup(name)
 	if !ok {
-		return nil, fmt.Errorf("no route configured for tool %q", name)
+		return nil, mcp.InvalidTool(name)
 	}
 
 	switch route.Backend {
