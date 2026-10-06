@@ -123,3 +123,34 @@ func TestHTTPClientDeadline(t *testing.T) {
 		t.Fatal("expected timeout")
 	}
 }
+
+func TestCancellationAfterSSEHeaders(t *testing.T) {
+	var notified atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req JSONRPCRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case InitializeMethod:
+			json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: InitializeResult{ProtocolVersion: ProtocolVersion, Capabilities: map[string]any{"tools": map[string]any{}}}})
+		case InitializedNotification:
+			w.WriteHeader(202)
+		case "notifications/cancelled":
+			notified.Store(true)
+			w.WriteHeader(202)
+		case ToolsCallMethod:
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, ": connected\n\n")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}
+	}))
+	defer server.Close()
+	c := NewHTTPClient(server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := c.CallTool(ctx, "slow", nil)
+	if err == nil || !notified.Load() {
+		t.Fatalf("cancellation notification missing: %v", err)
+	}
+}

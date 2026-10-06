@@ -1,6 +1,9 @@
 package mcp
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // ToolDefinition retains upstream metadata (annotations, outputSchema, etc.).
 type ToolDefinition struct {
@@ -13,7 +16,9 @@ type ToolDefinition struct {
 func (t *ToolDefinition) UnmarshalJSON(data []byte) error {
 	type plain ToolDefinition
 	var p plain
-	if err := json.Unmarshal(data, &p); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&p); err != nil {
 		return err
 	}
 	*t = ToolDefinition(p)

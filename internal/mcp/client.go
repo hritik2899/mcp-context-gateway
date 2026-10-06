@@ -195,6 +195,12 @@ func (c *HTTPClient) exchange(ctx context.Context, method string, params any, si
 		return nil, resp.Header, errors.New("downstream response too large")
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			if method == ToolsCallMethod {
+				c.cancelDownstream(sid, id)
+			}
+			return nil, resp.Header, ctx.Err()
+		}
 		return nil, resp.Header, err
 	}
 	var wire struct {

@@ -228,7 +228,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.write(w, request.ID, mcp.ToolsListResult{Tools: definitions}, nil)
 	case mcp.ToolsCallMethod:
 		var p mcp.CallToolParams
-		if json.Unmarshal(request.Params, &p) != nil || p.Name == "" {
+		decoder := json.NewDecoder(bytes.NewReader(request.Params))
+		decoder.UseNumber()
+		if decoder.Decode(&p) != nil || p.Name == "" {
 			h.fail(w, request.ID, mcp.InvalidParams, "tool name and object arguments are required")
 			return
 		}

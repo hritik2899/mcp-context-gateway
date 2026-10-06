@@ -150,3 +150,18 @@ func TestResponseSizeLimit(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 }
+
+type argumentEcho struct{ stub }
+
+func (s *argumentEcho) Execute(ctx context.Context, _ string, args map[string]any) (any, error) {
+	return args, nil
+}
+func TestLargeIntegerArgumentsRetainPrecision(t *testing.T) {
+	s := &argumentEcho{}
+	h := NewHandler(s, s, Options{})
+	sid := initialize(t, h)
+	w := request(h, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"test","arguments":{"id":9007199254740993}}}`)
+	if !strings.Contains(w.Body.String(), "9007199254740993") {
+		t.Fatal(w.Body.String())
+	}
+}
