@@ -2,51 +2,97 @@ package router
 
 import (
 	"context"
-	"testing"
-
+	"errors"
 	"github.com/hritik2899/mcp-context-gateway/internal/mcp"
+	"github.com/hritik2899/mcp-context-gateway/internal/tools"
+	"sync"
+	"testing"
 )
 
 type discoveryClient struct {
-	tools []mcp.ToolDefinition
+	mu     sync.Mutex
+	fail   bool
+	called string
 }
 
-func (c *discoveryClient) CallTool(ctx context.Context, name string, arguments map[string]any) (mcp.CallToolResult, error) {
-	return mcp.CallToolResult{}, nil
+func (c *discoveryClient) CallTool(ctx context.Context, name string, args map[string]any) (mcp.CallToolResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.called = name
+	return mcp.TextResult(name, false), nil
 }
-
-func (c *discoveryClient) ListTools(ctx context.Context) ([]mcp.ToolDefinition, error) {
-	return c.tools, nil
+func (c *discoveryClient) ListTools(context.Context) ([]mcp.ToolDefinition, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fail {
+		return nil, errors.New("down")
+	}
+	return []mcp.ToolDefinition{{Name: "search", InputSchema: map[string]any{"type": "object", "required": []any{"query"}, "properties": map[string]any{"query": map[string]any{"type": "string"}}}}}, nil
 }
-
-func TestDiscoveryAggregatesRegisteredServers(t *testing.T) {
+func TestCatalogRoutesFailureIsolationAndRemoval(t *testing.T) {
+	reg := tools.NewRegistry()
+	if err := reg.Register(tools.Definition{Name: "health.check", InputSchema: map[string]any{"type": "object"}}); err != nil {
+		t.Fatal(err)
+	}
+	local := tools.NewLocalExecutor(reg)
+	local.Register("health.check", func(context.Context, map[string]any) (any, error) { return "ok", nil })
 	servers := NewServerRegistry()
-	if err := servers.Register(Server{Name: "github", Client: &discoveryClient{tools: []mcp.ToolDefinition{{Name: "github.search"}}}}); err != nil {
+	a, b := &discoveryClient{}, &discoveryClient{}
+	servers.Register(Server{Name: "one", Client: a})
+	servers.Register(Server{Name: "two", Client: b})
+	c := NewCatalog(reg, local, servers, DiscoveryOptions{})
+	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := servers.Register(Server{Name: "jira", Client: &discoveryClient{tools: []mcp.ToolDefinition{{Name: "jira.search"}}}}); err != nil {
+	list, _ := c.List(context.Background())
+	if len(list) != 3 || list[1].Name != "one.search" || list[2].Name != "two.search" {
+		t.Fatal(list)
+	}
+	result, err := c.Execute(context.Background(), "one.search", map[string]any{"query": "test"})
+	if err != nil || result.(mcp.CallToolResult).IsError || a.called != "search" {
+		t.Fatal(result, err)
+	}
+	result, err = c.Execute(context.Background(), "one.search", map[string]any{"query": 42})
+	if err != nil || !result.(mcp.CallToolResult).IsError {
+		t.Fatal("schema validation missing")
+	}
+	a.mu.Lock()
+	a.fail = true
+	a.mu.Unlock()
+	if err := c.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-
-	got, err := NewDiscovery(servers).Discover(context.Background())
-	if err != nil {
+	list, _ = c.List(context.Background())
+	if len(list) != 2 || c.Ready() {
+		t.Fatal(list)
+	}
+	if _, err := c.Execute(context.Background(), "two.search", map[string]any{"query": "still works"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].Name != "github.search" || got[1].Name != "jira.search" {
-		t.Fatalf("unexpected discovered tools: %+v", got)
+	if _, err := c.RemoveServer(context.Background(), "two"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Execute(context.Background(), "two.search", nil); err == nil {
+		t.Fatal("removed route remains")
 	}
 }
-
-func TestDiscoveryRejectsToolNameCollision(t *testing.T) {
+func TestCatalogConcurrentRefreshAndCalls(t *testing.T) {
+	reg := tools.NewRegistry()
 	servers := NewServerRegistry()
-	if err := servers.Register(Server{Name: "one", Client: &discoveryClient{tools: []mcp.ToolDefinition{{Name: "search"}}}}); err != nil {
-		t.Fatal(err)
+	servers.Register(Server{Name: "one", Client: &discoveryClient{}})
+	c := NewCatalog(reg, tools.NewLocalExecutor(reg), servers, DiscoveryOptions{})
+	c.Refresh(context.Background())
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				c.Refresh(context.Background())
+				c.List(context.Background())
+				c.Execute(context.Background(), "one.search", map[string]any{"query": "test"})
+			}
+		}()
 	}
-	if err := servers.Register(Server{Name: "two", Client: &discoveryClient{tools: []mcp.ToolDefinition{{Name: "search"}}}}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := NewDiscovery(servers).Discover(context.Background()); err == nil {
-		t.Fatal("expected duplicate tool error")
-	}
+	wg.Wait()
 }

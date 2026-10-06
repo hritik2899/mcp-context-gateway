@@ -3,47 +3,130 @@ package router
 import (
 	"context"
 	"fmt"
-
 	"github.com/hritik2899/mcp-context-gateway/internal/mcp"
+	"sync"
+	"time"
 )
 
-// Discovery aggregates tool definitions from downstream MCP servers.
-type Discovery struct {
-	servers *ServerRegistry
-}
-
-func NewDiscovery(servers *ServerRegistry) *Discovery {
-	return &Discovery{servers: servers}
-}
-
-// Discover returns the union of tools exposed by registered downstream servers.
-// A duplicate tool name is rejected rather than silently choosing one backend.
-func (d *Discovery) Discover(ctx context.Context) ([]mcp.ToolDefinition, error) {
-	if d.servers == nil {
-		return nil, fmt.Errorf("server registry is unavailable")
+func (c *Catalog) Refresh(ctx context.Context) error {
+	select {
+	case c.refresh <- struct{}{}:
+		defer func() { <-c.refresh }()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	var result []mcp.ToolDefinition
-	seen := make(map[string]string)
-
-	for _, server := range d.servers.List() {
-		discoverer, ok := server.Client.(mcp.ToolDiscoverer)
-		if !ok {
-			return nil, fmt.Errorf("server %q does not support tool discovery", server.Name)
-		}
-
-		tools, err := discoverer.ListTools(ctx)
+	next := map[string]entry{}
+	for _, tool := range c.local.List() {
+		e, err := makeEntry(mcp.ToolDefinition{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema}, Server{})
 		if err != nil {
-			return nil, fmt.Errorf("discover tools from server %q: %w", server.Name, err)
+			return err
 		}
-		for _, tool := range tools {
-			if previous, exists := seen[tool.Name]; exists {
-				return nil, fmt.Errorf("tool %q is exposed by both %q and %q", tool.Name, previous, server.Name)
+		next[tool.Name] = e
+	}
+	servers := c.servers.List()
+	health := make([]ServerHealth, len(servers))
+	discovered := make([]map[string]entry, len(servers))
+	gate := make(chan struct{}, c.options.Concurrency)
+	var wg sync.WaitGroup
+	for i, server := range servers {
+		wg.Add(1)
+		go func(i int, server Server) {
+			defer wg.Done()
+			health[i] = ServerHealth{Name: server.Name, CheckedAt: time.Now()}
+			select {
+			case gate <- struct{}{}:
+				defer func() { <-gate }()
+			case <-ctx.Done():
+				health[i].Error = "discovery cancelled"
+				return
 			}
-			seen[tool.Name] = server.Name
-			result = append(result, tool)
+			child, cancel := context.WithTimeout(ctx, c.options.Timeout)
+			defer cancel()
+			discoverer, ok := server.Client.(mcp.ToolDiscoverer)
+			if !ok {
+				health[i].Error = "tool discovery unsupported"
+				return
+			}
+			definitions, err := discoverer.ListTools(child)
+			if err != nil {
+				health[i].Error = "downstream discovery failed"
+				return
+			}
+			entries := map[string]entry{}
+			for _, def := range definitions {
+				e, err := makeEntry(def, server)
+				if err != nil {
+					health[i].Error = "invalid downstream tool definition"
+					return
+				}
+				if _, exists := entries[e.definition.Name]; exists {
+					health[i].Error = "duplicate downstream tool name"
+					return
+				}
+				entries[e.definition.Name] = e
+			}
+			discovered[i] = entries
+			health[i].Healthy = true
+			health[i].ToolCount = len(entries)
+		}(i, server)
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for i, entries := range discovered {
+		collision := false
+		for name := range entries {
+			if _, exists := next[name]; exists {
+				collision = true
+				break
+			}
+		}
+		if collision {
+			health[i].Healthy = false
+			health[i].Error = "tool name collides with existing catalog"
+			health[i].ToolCount = 0
+			continue
+		}
+		for name, e := range entries {
+			next[name] = e
 		}
 	}
+	c.mu.Lock()
+	c.entries = next
+	c.health = health
+	c.mu.Unlock()
+	return nil
+}
 
-	return result, nil
+// RemoveServer withdraws advertised routes first. Already admitted calls may finish.
+// Callers own closing the returned client after their shutdown grace period.
+func (c *Catalog) RemoveServer(ctx context.Context, name string) (Server, error) {
+	select {
+	case c.refresh <- struct{}{}:
+		defer func() { <-c.refresh }()
+	case <-ctx.Done():
+		return Server{}, ctx.Err()
+	}
+	server, ok := c.servers.Remove(name)
+	if !ok {
+		return Server{}, fmt.Errorf("unknown server %q", name)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := map[string]entry{}
+	for key, e := range c.entries {
+		if e.server.Name != name {
+			next[key] = e
+		}
+	}
+	c.entries = next
+	health := []ServerHealth{}
+	for _, h := range c.health {
+		if h.Name != name {
+			health = append(health, h)
+		}
+	}
+	c.health = health
+	return server, nil
 }

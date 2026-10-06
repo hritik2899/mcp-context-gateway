@@ -32,15 +32,17 @@ func main() {
 	}
 
 	servers := router.NewServerRegistry()
-	executionRouter := router.New(executor, routes, servers)
-	catalog := router.NewCatalog(registry, router.NewDiscovery(servers))
+	catalog := router.NewCatalog(registry, executor, servers, router.DiscoveryOptions{})
+	if err := catalog.Refresh(context.Background()); err != nil {
+		log.Fatal(err)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"status":"ok"}`)
 	})
-	mux.Handle("/mcp", gateway.NewHandler(catalog, executionRouter, gateway.Options{}))
+	mux.Handle("/mcp", gateway.NewHandler(catalog, catalog, gateway.Options{}))
 
 	server := &http.Server{Addr: "127.0.0.1:8080", Handler: mux}
 	log.Printf("mcp-context-gateway listening on %s", server.Addr)
