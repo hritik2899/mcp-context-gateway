@@ -116,6 +116,9 @@ func (c *Config) Validate() error {
 	if c.MaxRequestBytes > 64<<20 || c.MaxResponseBytes > 64<<20 {
 		return fmt.Errorf("body limits must not exceed 64 MiB")
 	}
+	if len(c.Servers) > 100 {
+		return fmt.Errorf("at most 100 downstream servers are supported")
+	}
 	seen := map[string]bool{}
 	for i := range c.Servers {
 		s := &c.Servers[i]
@@ -144,7 +147,7 @@ func (c *Config) Validate() error {
 		}
 		if s.TokenEnv != "" {
 			s.Token = os.Getenv(s.TokenEnv)
-			if s.Token == "" {
+			if s.Token == "" || strings.ContainsAny(s.Token, "\r\n") {
 				return fmt.Errorf("credential environment variable for server %q is empty", s.Name)
 			}
 			if u.Scheme != "https" {

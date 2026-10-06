@@ -1,0 +1,2 @@
+# Reproducible independent MCP client/server implementation for contract checks.
+mcp==1.26.0

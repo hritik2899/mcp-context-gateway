@@ -26,10 +26,11 @@ type Executor interface {
 	Execute(context.Context, string, map[string]any) (any, error)
 }
 type Options struct {
-	MaxBodyBytes   int64
-	RequestTimeout time.Duration
-	SessionTTL     time.Duration
-	MaxSessions    int
+	MaxBodyBytes     int64
+	MaxResponseBytes int64
+	RequestTimeout   time.Duration
+	SessionTTL       time.Duration
+	MaxSessions      int
 }
 type session struct {
 	owner       string
@@ -51,6 +52,9 @@ func WithIdentity(ctx context.Context, name string) context.Context {
 }
 func Identity(ctx context.Context) string { v, _ := ctx.Value(identityKey{}).(string); return v }
 func NewHandler(c Catalog, e Executor, o Options) *Handler {
+	if o.MaxResponseBytes <= 0 {
+		o.MaxResponseBytes = 4 << 20
+	}
 	if o.MaxBodyBytes <= 0 {
 		o.MaxBodyBytes = 1 << 20
 	}
@@ -84,16 +88,16 @@ func accepts(header, media string) bool {
 	}
 	return false
 }
-func write(w http.ResponseWriter, id json.RawMessage, result any, rpcErr *mcp.JSONRPCError) {
+func (h *Handler) write(w http.ResponseWriter, id json.RawMessage, result any, rpcErr *mcp.JSONRPCError) {
 	data, err := json.Marshal(mcp.JSONRPCResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr})
-	if err != nil {
-		data, _ = json.Marshal(mcp.JSONRPCResponse{JSONRPC: "2.0", ID: id, Error: &mcp.JSONRPCError{Code: mcp.InternalError, Message: "cannot encode result"}})
+	if err != nil || len(data) > int(h.options.MaxResponseBytes) {
+		data, _ = json.Marshal(mcp.JSONRPCResponse{JSONRPC: "2.0", ID: id, Error: &mcp.JSONRPCError{Code: mcp.InternalError, Message: "result cannot be encoded within the response limit"}})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
 }
-func fail(w http.ResponseWriter, id json.RawMessage, code int, message string) {
-	write(w, id, nil, &mcp.JSONRPCError{Code: code, Message: message})
+func (h *Handler) fail(w http.ResponseWriter, id json.RawMessage, code int, message string) {
+	h.write(w, id, nil, &mcp.JSONRPCError{Code: code, Message: message})
 }
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
@@ -129,28 +133,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &max) {
 			http.Error(w, "request body too large", 413)
 		} else {
-			fail(w, nil, mcp.ParseError, "cannot read JSON")
+			h.fail(w, nil, mcp.ParseError, "cannot read JSON")
 		}
 		return
 	}
 	if !json.Valid(data) {
-		fail(w, nil, mcp.ParseError, "invalid JSON")
+		h.fail(w, nil, mcp.ParseError, "invalid JSON")
 		return
 	}
 	var request mcp.JSONRPCRequest
 	if len(bytes.TrimSpace(data)) == 0 || bytes.TrimSpace(data)[0] != '{' || json.Unmarshal(data, &request) != nil || request.JSONRPC != "2.0" || request.Method == "" {
-		fail(w, nil, mcp.InvalidRequest, "invalid JSON-RPC request")
+		h.fail(w, nil, mcp.InvalidRequest, "invalid JSON-RPC request")
 		return
 	}
 	if len(request.ID) > 0 && !validID(request.ID) {
-		fail(w, nil, mcp.InvalidRequest, "id must be a string or integer")
+		h.fail(w, nil, mcp.InvalidRequest, "id must be a string or integer")
 		return
 	}
 	if len(request.Params) > 0 && (len(bytes.TrimSpace(request.Params)) == 0 || bytes.TrimSpace(request.Params)[0] != '{') {
 		if len(request.ID) == 0 {
 			w.WriteHeader(202)
 		} else {
-			fail(w, request.ID, mcp.InvalidParams, "params must be an object")
+			h.fail(w, request.ID, mcp.InvalidParams, "params must be an object")
 		}
 		return
 	}
@@ -188,13 +192,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.initialized && request.Method != "ping" {
 		h.mu.Unlock()
-		fail(w, request.ID, mcp.InvalidRequest, "session is not initialized")
+		h.fail(w, request.ID, mcp.InvalidRequest, "session is not initialized")
 		return
 	}
 	key := string(request.ID)
 	if _, exists := s.active[key]; exists {
 		h.mu.Unlock()
-		fail(w, request.ID, mcp.InvalidRequest, "duplicate in-flight request id")
+		h.fail(w, request.ID, mcp.InvalidRequest, "duplicate in-flight request id")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), h.options.RequestTimeout)
@@ -203,14 +207,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() { cancel(); h.mu.Lock(); delete(s.active, key); h.mu.Unlock() }()
 	switch request.Method {
 	case "ping":
-		write(w, request.ID, map[string]any{}, nil)
+		h.write(w, request.ID, map[string]any{}, nil)
 	case mcp.ToolsListMethod:
 		// A complete bounded catalog is returned in one page; stale cursors are rejected.
 		var p struct {
 			Cursor string `json:"cursor"`
 		}
 		if len(request.Params) > 0 && (json.Unmarshal(request.Params, &p) != nil || p.Cursor != "") {
-			fail(w, request.ID, mcp.InvalidParams, "invalid cursor")
+			h.fail(w, request.ID, mcp.InvalidParams, "invalid cursor")
 			return
 		}
 		definitions, err := h.catalog.List(ctx)
@@ -221,11 +225,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if definitions == nil {
 			definitions = []mcp.ToolDefinition{}
 		}
-		write(w, request.ID, mcp.ToolsListResult{Tools: definitions}, nil)
+		h.write(w, request.ID, mcp.ToolsListResult{Tools: definitions}, nil)
 	case mcp.ToolsCallMethod:
 		var p mcp.CallToolParams
 		if json.Unmarshal(request.Params, &p) != nil || p.Name == "" {
-			fail(w, request.ID, mcp.InvalidParams, "tool name and object arguments are required")
+			h.fail(w, request.ID, mcp.InvalidParams, "tool name and object arguments are required")
 			return
 		}
 		result, err := h.executor.Execute(ctx, p.Name, p.Arguments)
@@ -238,40 +242,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.writeExecutionError(w, request.ID, err)
 			return
 		}
-		write(w, request.ID, normalized, nil)
+		h.write(w, request.ID, normalized, nil)
 	default:
-		fail(w, request.ID, mcp.MethodNotFound, "method not found")
+		h.fail(w, request.ID, mcp.MethodNotFound, "method not found")
 	}
 }
 func (h *Handler) writeExecutionError(w http.ResponseWriter, id json.RawMessage, err error) {
 	var rpc *mcp.JSONRPCError
 	if errors.As(err, &rpc) {
-		write(w, id, nil, rpc)
+		h.write(w, id, nil, rpc)
 		return
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		fail(w, id, mcp.InternalError, "request deadline exceeded")
+		h.fail(w, id, mcp.InternalError, "request deadline exceeded")
 		return
 	}
 	if errors.Is(err, context.Canceled) {
-		fail(w, id, mcp.InternalError, "request cancelled")
+		h.fail(w, id, mcp.InternalError, "request cancelled")
 		return
 	}
-	fail(w, id, mcp.InternalError, "tool backend unavailable")
+	h.fail(w, id, mcp.InternalError, "tool backend unavailable")
 }
 func (h *Handler) initialize(w http.ResponseWriter, r *http.Request, request mcp.JSONRPCRequest) {
 	var p mcp.InitializeParams
 	if json.Unmarshal(request.Params, &p) != nil || p.ProtocolVersion == "" || p.ClientInfo.Name == "" || p.ClientInfo.Version == "" || p.Capabilities == nil {
-		fail(w, request.ID, mcp.InvalidParams, "protocolVersion, capabilities and clientInfo are required")
+		h.fail(w, request.ID, mcp.InvalidParams, "protocolVersion, capabilities and clientInfo are required")
 		return
 	}
 	if r.Header.Get("MCP-Session-Id") != "" {
-		fail(w, request.ID, mcp.InvalidRequest, "initialize must create a new session")
+		h.fail(w, request.ID, mcp.InvalidRequest, "initialize must create a new session")
 		return
 	}
 	var token [32]byte
 	if _, err := rand.Read(token[:]); err != nil {
-		fail(w, request.ID, mcp.InternalError, "cannot create session")
+		h.fail(w, request.ID, mcp.InternalError, "cannot create session")
 		return
 	}
 	sid := hex.EncodeToString(token[:])
@@ -285,7 +289,7 @@ func (h *Handler) initialize(w http.ResponseWriter, r *http.Request, request mcp
 	h.sessions[sid] = &session{owner: Identity(r.Context()), expires: time.Now().Add(h.options.SessionTTL), active: map[string]context.CancelFunc{}}
 	h.mu.Unlock()
 	w.Header().Set("MCP-Session-Id", sid)
-	write(w, request.ID, mcp.InitializeResult{ProtocolVersion: mcp.ProtocolVersion, Capabilities: map[string]any{"tools": map[string]any{}}, ServerInfo: mcp.ServerInfo{Name: "mcp-context-gateway", Version: "0.2.0"}}, nil)
+	h.write(w, request.ID, mcp.InitializeResult{ProtocolVersion: mcp.ProtocolVersion, Capabilities: map[string]any{"tools": map[string]any{}}, ServerInfo: mcp.ServerInfo{Name: "mcp-context-gateway", Version: "0.2.0"}}, nil)
 }
 func (h *Handler) expireLocked(now time.Time) {
 	for id, s := range h.sessions {

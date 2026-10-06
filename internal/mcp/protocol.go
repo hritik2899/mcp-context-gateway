@@ -109,6 +109,12 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 	if b.Raw != nil {
 		return b.Raw, nil
 	}
+	if b.Type == "text" {
+		return json.Marshal(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{Type: b.Type, Text: b.Text})
+	}
 	type plain ContentBlock
 	return json.Marshal(plain(b))
 }

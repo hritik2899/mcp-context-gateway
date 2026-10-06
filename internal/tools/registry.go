@@ -36,7 +36,8 @@ func (r *Registry) Register(definition Definition) error {
 	if err != nil {
 		return fmt.Errorf("invalid tool schema: %w", err)
 	}
-	if err := json.Unmarshal(data, &definition); err != nil {
+	var copied Definition
+	if err := json.Unmarshal(data, &copied); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -45,7 +46,7 @@ func (r *Registry) Register(definition Definition) error {
 	if _, exists := r.tools[definition.Name]; exists {
 		return fmt.Errorf("tool %q is already registered", definition.Name)
 	}
-	r.tools[definition.Name] = definition
+	r.tools[definition.Name] = copied
 	return nil
 }
 

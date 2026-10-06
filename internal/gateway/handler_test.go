@@ -140,3 +140,13 @@ func TestSessionBoundToIdentity(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestResponseSizeLimit(t *testing.T) {
+	s := &stub{result: mcp.TextResult(strings.Repeat("x", 4096), false)}
+	h := NewHandler(s, s, Options{MaxResponseBytes: 1024})
+	sid := initialize(t, h)
+	w := request(h, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"test"}}`)
+	if w.Body.Len() > 1024 || !strings.Contains(w.Body.String(), `"error"`) {
+		t.Fatal(w.Body.String())
+	}
+}

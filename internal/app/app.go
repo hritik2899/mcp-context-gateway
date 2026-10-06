@@ -67,7 +67,7 @@ func New(ctx context.Context, c config.Config, logger *slog.Logger) (*App, error
 	}
 	access := policy.New(c)
 	service := &policy.Service{Policy: access, Catalog: a.Catalog, Executor: &contextpolicy.Service{Executor: a.Catalog, Options: c.Context}}
-	a.MCP = gateway.NewHandler(service, service, gateway.Options{MaxBodyBytes: c.MaxRequestBytes, RequestTimeout: c.RequestTimeout.Value(), SessionTTL: c.SessionTTL.Value(), MaxSessions: c.MaxSessions})
+	a.MCP = gateway.NewHandler(service, service, gateway.Options{MaxBodyBytes: c.MaxRequestBytes, MaxResponseBytes: c.MaxResponseBytes, RequestTimeout: c.RequestTimeout.Value(), SessionTTL: c.SessionTTL.Value(), MaxSessions: c.MaxSessions})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", access.Middleware(a.MCP))
 	mux.Handle("GET /metrics", access.Middleware(metrics))
