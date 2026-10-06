@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"github.com/hritik2899/mcp-context-gateway/internal/config"
+	contextpolicy "github.com/hritik2899/mcp-context-gateway/internal/context"
 	"github.com/hritik2899/mcp-context-gateway/internal/gateway"
 	"github.com/hritik2899/mcp-context-gateway/internal/mcp"
 	"github.com/hritik2899/mcp-context-gateway/internal/observability"
@@ -65,7 +66,7 @@ func New(ctx context.Context, c config.Config, logger *slog.Logger) (*App, error
 		return nil, err
 	}
 	access := policy.New(c)
-	service := &policy.Service{Policy: access, Catalog: a.Catalog, Executor: a.Catalog}
+	service := &policy.Service{Policy: access, Catalog: a.Catalog, Executor: &contextpolicy.Service{Executor: a.Catalog, Options: c.Context}}
 	a.MCP = gateway.NewHandler(service, service, gateway.Options{MaxBodyBytes: c.MaxRequestBytes, RequestTimeout: c.RequestTimeout.Value(), SessionTTL: c.SessionTTL.Value(), MaxSessions: c.MaxSessions})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", access.Middleware(a.MCP))

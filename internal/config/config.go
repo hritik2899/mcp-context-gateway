@@ -48,8 +48,9 @@ type Principal struct {
 	Token             string   `json:"-"`
 }
 type ContextPolicy struct {
-	MaxOutputBytes int      `json:"maxOutputBytes"`
-	RedactKeys     []string `json:"redactKeys"`
+	MaxEstimatedTokens int      `json:"maxEstimatedTokens"`
+	MaxOutputBytes     int      `json:"maxOutputBytes"`
+	RedactKeys         []string `json:"redactKeys"`
 }
 type Config struct {
 	Listen                string        `json:"listen"`
@@ -185,8 +186,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("invalid allowed origin")
 		}
 	}
-	if c.Context.MaxOutputBytes < 0 || (c.Context.MaxOutputBytes > 0 && c.Context.MaxOutputBytes < 256) {
-		return fmt.Errorf("context maxOutputBytes must be zero or at least 256")
+	if c.Context.MaxEstimatedTokens < 0 || (c.Context.MaxEstimatedTokens > 0 && c.Context.MaxEstimatedTokens < 128) || c.Context.MaxEstimatedTokens > 16<<20 {
+		return fmt.Errorf("maxEstimatedTokens must be zero or 128..16777216")
+	}
+	if c.Context.MaxOutputBytes < 0 || (c.Context.MaxOutputBytes > 0 && c.Context.MaxOutputBytes < 512) {
+		return fmt.Errorf("context maxOutputBytes must be zero or at least 512")
 	}
 	return nil
 }
