@@ -2,49 +2,78 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"errors"
+	"flag"
+	"github.com/hritik2899/mcp-context-gateway/internal/app"
+	"github.com/hritik2899/mcp-context-gateway/internal/config"
+	"log/slog"
 	"net/http"
-
-	"github.com/hritik2899/mcp-context-gateway/internal/gateway"
-	"github.com/hritik2899/mcp-context-gateway/internal/router"
-	"github.com/hritik2899/mcp-context-gateway/internal/tools"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
-const serverVersion = "0.1.0"
-
 func main() {
-	registry := tools.NewRegistry()
-	_ = registry.Register(tools.Definition{
-		Name:        "health.check",
-		Description: "Returns the gateway health status.",
-		InputSchema: map[string]any{"type": "object"},
-	})
-
-	executor := tools.NewLocalExecutor(registry)
-	_ = executor.Register("health.check", func(ctx context.Context, arguments map[string]any) (any, error) {
-		return map[string]any{"status": "ok"}, nil
-	})
-
-	routes := router.NewRouteRegistry()
-	if err := routes.Register(router.ToolRoute{ToolName: "health.check", Backend: router.BackendLocal}); err != nil {
-		log.Fatal(err)
+	if err := run(); err != nil {
+		slog.Error("gateway stopped", "error", err)
+		os.Exit(1)
 	}
-
-	servers := router.NewServerRegistry()
-	catalog := router.NewCatalog(registry, executor, servers, router.DiscoveryOptions{})
-	if err := catalog.Refresh(context.Background()); err != nil {
-		log.Fatal(err)
+}
+func run() error {
+	filename := flag.String("config", "", "path to JSON configuration")
+	check := flag.Bool("check", false, "validate configuration and exit")
+	flag.Parse()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
+	c, err := config.Load(*filename)
+	if err != nil {
+		return err
 	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"ok"}`)
-	})
-	mux.Handle("/mcp", gateway.NewHandler(catalog, catalog, gateway.Options{}))
-
-	server := &http.Server{Addr: "127.0.0.1:8080", Handler: mux}
-	log.Printf("mcp-context-gateway listening on %s", server.Addr)
-	log.Fatal(server.ListenAndServe())
+	if *check {
+		logger.Info("configuration valid")
+		return nil
+	}
+	application, err := app.New(context.Background(), c, logger)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Addr: c.Listen, Handler: application.Handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: c.RequestTimeout.Value() + 2*time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	errorsCh := make(chan error, 1)
+	go func() { logger.Info("gateway listening", "address", c.Listen); errorsCh <- server.ListenAndServe() }()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	var serveErr error
+running:
+	for {
+		select {
+		case serveErr = <-errorsCh:
+			break running
+		case sig := <-signals:
+			if sig == syscall.SIGHUP {
+				ctx, cancel := context.WithTimeout(context.Background(), c.DiscoveryTimeout.Value())
+				err := application.Catalog.Refresh(ctx)
+				cancel()
+				if err != nil {
+					logger.Warn("discovery refresh failed")
+				}
+				continue
+			}
+			break running
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.ShutdownTimeout.Value())
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		server.Close()
+		logger.Warn("HTTP shutdown grace expired")
+	}
+	if err := application.Close(ctx); err != nil {
+		logger.Warn("downstream session cleanup incomplete")
+	}
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		return nil
+	}
+	return serveErr
 }

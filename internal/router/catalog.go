@@ -18,6 +18,7 @@ import (
 type DiscoveryOptions struct {
 	Concurrency int
 	Timeout     time.Duration
+	Observe     func(context.Context, string, string, bool, time.Duration)
 }
 type entry struct {
 	definition mcp.ToolDefinition
@@ -75,13 +76,27 @@ func (c *Catalog) List(ctx context.Context) ([]mcp.ToolDefinition, error) {
 	err = json.Unmarshal(data, &copy)
 	return copy, err
 }
-func (c *Catalog) Execute(ctx context.Context, name string, arguments map[string]any) (any, error) {
+func (c *Catalog) Execute(ctx context.Context, name string, arguments map[string]any) (result any, err error) {
 	c.mu.RLock()
 	e, ok := c.entries[name]
 	c.mu.RUnlock()
 	if !ok {
 		return nil, mcp.InvalidTool(name)
 	}
+	start := time.Now()
+	defer func() {
+		if c.options.Observe != nil {
+			failed := err != nil
+			if r, ok := result.(mcp.CallToolResult); ok {
+				failed = failed || r.IsError
+			}
+			server := e.server.Name
+			if server == "" {
+				server = "local"
+			}
+			c.options.Observe(ctx, server, name, failed, time.Since(start))
+		}
+	}()
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
