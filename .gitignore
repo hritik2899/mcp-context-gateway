@@ -2,3 +2,5 @@
 /coverage.out
 .env
 *.local.json
+/.venv/
+__pycache__/

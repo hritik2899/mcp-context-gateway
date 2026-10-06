@@ -1,331 +1,140 @@
 # MCP Context Gateway
 
-> A production-oriented MCP gateway for discovering, routing, executing, and eventually governing tools across multiple downstream MCP servers.
+A Go gateway that exposes local tools and tools from multiple downstream MCP HTTP servers through one endpoint. Discovery and execution share an atomic catalog, so advertised remote tools always have a route.
 
-**Status: Active development — architecture established, product build in progress.**
+**Status:** functional tools gateway with unit, race, end-to-end, and official Python MCP SDK interoperability checks. Production deployment requires configuring credentials, TLS termination, and operational limits for your environment.
 
-The goal is not to build another thin MCP server. The goal is to build a **gateway layer between MCP clients and a distributed set of MCP servers**, providing one controlled entry point for tool discovery, routing, execution, context management, resilience, observability, and policy.
+## What works
 
-## Vision
+- MCP **2025-06-18** tools protocol, initialization, session lifecycle, ping, and cancellation.
+- Downstream HTTP initialization, capability checks, session headers, JSON/SSE responses, bounded pagination, and response ID validation.
+- Lossless remote tool results by default: `isError`, structured content, images/resources, and extension metadata survive the gateway.
+- Server-prefixed tools (`github.search`, `jira.search`) with original downstream names retained for execution.
+- Validated, cached discovery snapshots; bounded parallel refresh; per-server failure isolation.
+- JSON Schema argument validation with external schema references disabled.
+- Bearer service credentials, principal-specific tool/server rules, deny rules, Origin validation, quotas, and bounded concurrent requests.
+- Per-downstream deadlines, bulkheads, circuit breakers, and safe session recovery for discovery. Tool calls are never automatically replayed.
+- Optional per-request context redaction and output budgets, with explicit truncation notices.
+- JSON logs, request IDs, tool audit records, Prometheus metrics, liveness/readiness, and graceful shutdown.
 
-Without a gateway, an MCP client can become tightly coupled to many individual servers:
+## Quick start
 
-```text
-                    MCP Client
-                        │
-             ┌──────────┼──────────┐
-             ▼          ▼          ▼
-          GitHub       Jira       DB
-           MCP         MCP       MCP
-```
-
-The gateway changes that topology:
-
-```text
-                         MCP Client
-                              │
-                              ▼
-                  ┌──────────────────────┐
-                  │   MCP Context       │
-                  │      Gateway         │
-                  │                      │
-                  │  Protocol Layer      │
-                  │  Tool Registry       │
-                  │  Route Registry      │
-                  │  Execution Router    │
-                  │  Context Engine      │
-                  │  Policy              │
-                  │  Resilience          │
-                  │  Observability       │
-                  └──────────┬───────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-        GitHub MCP       Jira MCP       Database MCP
-```
-
-The client sees one gateway. The gateway manages the complexity behind it.
-
-## Product vision
-
-The final system is intended to provide:
-
-- **MCP protocol termination** — accept MCP requests through a stable gateway endpoint.
-- **Tool discovery** — aggregate tools available locally and across downstream MCP servers.
-- **Explicit routing** — map tools to local executors or specific downstream MCP servers.
-- **Execution abstraction** — separate discovery from the mechanism used to execute a tool.
-- **Context management** — control, enrich, filter, budget, and eventually compress context through tool workflows.
-- **Policy and governance** — central authentication, authorization, tool policy, quotas, and safety controls.
-- **Resilience** — timeouts, cancellation, safe retries, circuit breaking, and downstream failure isolation.
-- **Observability** — structured logs, metrics, traces, request correlation, latency, and tool-level visibility.
-- **Multi-server orchestration** — manage downstream MCP servers as independently addressable execution backends.
-- **Production operability** — configuration, health checks, graceful shutdown, testing, and deployment-oriented design.
-
-The architecture is intentionally built incrementally so every boundary remains understandable and independently testable.
-
-## Current architecture
-
-The project has crossed the basic MCP-server stage and now contains the core boundaries required for the gateway:
-
-```text
-                         MCP Client
-                              │
-                              ▼
-                     ┌────────────────┐
-                     │ HTTP Transport │
-                     └───────┬────────┘
-                             │
-                             ▼
-                     ┌────────────────┐
-                     │  MCP Protocol  │
-                     │                │
-                     │ initialize     │
-                     │ tools/list     │
-                     │ tools/call     │
-                     └───────┬────────┘
-                             │
-                             ▼
-                     ┌────────────────┐
-                     │     Router     │
-                     └───────┬────────┘
-                             │
-                 ┌───────────┴───────────┐
-                 ▼                       ▼
-          ┌─────────────┐        ┌────────────────┐
-          │ Tool Routes │        │ Server Registry│
-          └──────┬──────┘        └───────┬────────┘
-                 │                       │
-          ┌──────┴──────┐          ┌─────┴──────┐
-          ▼             ▼          ▼            ▼
-       Local          Remote     MCP Client   MCP Client
-       Executor       Backend      GitHub       Jira
-          │             │
-          ▼             ▼
-       Local Tool   Downstream MCP
-                       Server
-```
-
-### Core boundaries
-
-| Component | Responsibility |
-|---|---|
-| `internal/mcp` | JSON-RPC/MCP protocol types and downstream MCP client contract |
-| `internal/tools` | Tool definitions, registry, and local execution |
-| `internal/router` | Tool routing and downstream server registration |
-| `cmd/gateway` | HTTP service composition and application entrypoint |
-
-These boundaries will evolve as context, policy, resilience, and observability become concrete subsystems.
-
-## Request flow
-
-A local tool call follows this shape:
-
-```text
-Client
-  │ tools/call
-  ▼
-Gateway
-  │
-  ▼
-MCP Protocol
-  │
-  ▼
-Router
-  │
-  ▼
-Route Registry
-  │
-  ▼
-Execution Backend
-  │
-  ▼
-Tool
-  │
-  ▼
-MCP Result
-  │
-  ▼
-Client
-```
-
-The intended remote flow is:
-
-```text
-Client
-  │ tools/call
-  ▼
-Gateway
-  │
-  ▼
-Router
-  │
-  ▼
-Tool → Downstream Server
-  │
-  ▼
-MCP Client
-  │
-  ▼
-Remote MCP Server
-  │
-  ▼
-Result
-  │
-  ▼
-Gateway
-  │
-  ▼
-Client
-```
-
-This separation allows new execution backends without coupling MCP transport to implementation details.
-
-## Current capabilities
-
-The foundation currently includes:
-
-- Runnable Go HTTP gateway.
-- `/healthz` health endpoint.
-- JSON-RPC 2.0 request/response envelopes and errors.
-- MCP initialization lifecycle and capability advertisement.
-- `tools/list` discovery.
-- `tools/call` execution.
-- Concurrency-safe tool registry with deterministic discovery ordering.
-- Local tool executor abstraction.
-- Request-context propagation for cancellation.
-- Execution router abstraction.
-- Downstream MCP client abstraction.
-- Downstream MCP server registry.
-- Explicit local/remote tool routing model.
-- Initial unit tests around routing invariants.
-
-This describes the current implementation, not the end state.
-
-## Design principles
-
-### 1. Protocol is not execution
-
-MCP transport should not know whether a tool is implemented locally, remotely, or through another backend.
-
-```text
-Protocol → Router → Execution Backend
-```
-
-### 2. Discovery is not execution
-
-Knowing that a tool exists is different from knowing how to execute it.
-
-```text
-Registry ≠ Executor
-```
-
-### 3. Gateway owns policy
-
-Cross-cutting concerns belong at the gateway boundary rather than being duplicated across every downstream server.
-
-### 4. Cancellation must propagate
-
-A cancelled client request should be able to cancel downstream work whenever the backend supports cancellation.
-
-### 5. Prefer explicit routing
-
-Tool ownership and backend selection should be observable and explainable.
-
-### 6. Incremental architecture
-
-Each layer should be introduced because a real requirement exists. Avoid abstraction for abstraction's sake.
-
-### 7. Production behavior matters
-
-Latency, concurrency, failure modes, memory, network I/O, observability, and operational recovery are first-class design concerns.
-
-## Repository structure
-
-```text
-mcp-context-gateway/
-├── cmd/
-│   └── gateway/
-│       └── main.go
-│
-├── internal/
-│   ├── mcp/
-│   │   ├── client.go
-│   │   └── protocol.go
-│   │
-│   ├── router/
-│   │   ├── router.go
-│   │   ├── routes.go
-│   │   ├── routes_test.go
-│   │   └── servers.go
-│   │
-│   └── tools/
-│       ├── executor.go
-│       └── registry.go
-│
-├── go.mod
-└── README.md
-```
-
-The structure will evolve as the context engine, policy, resilience, and observability subsystems become concrete.
-
-## Running locally
-
-Requirements:
-
-- Go 1.24+
-
-Start the gateway:
+Go **1.24 or newer** is required. Use a currently supported, patched Go release for deployments.
 
 ```bash
 go run ./cmd/gateway
-```
-
-Health check:
-
-```bash
-curl http://localhost:8080/healthz
-```
-
-Expected response:
-
-```json
-{"status":"ok"}
-```
-
-Run tests:
-
-```bash
+curl http://127.0.0.1:8080/healthz
 go test ./...
 ```
 
-## Engineering direction
+The default configuration listens only on `127.0.0.1:8080`, exposes `health.check`, and does not require credentials. Non-loopback binding requires configured principals. Origins are denied unless explicitly allowlisted.
 
-This repository is being built as a long-running systems project rather than a one-shot demo.
+The MCP endpoint is `http://127.0.0.1:8080/mcp`. Use a Streamable HTTP MCP client. Initialization returns an `MCP-Session-Id`; send it on subsequent requests, followed by `notifications/initialized`. The negotiated protocol is `2025-06-18` even when a client requests a newer version. `GET /mcp` returns 405 because this gateway does not expose a server-initiated event stream.
 
-The implementation will progress through measurable architectural increments:
+## Run the complete two-server example
 
-```text
-MCP Server
-    ↓
-MCP Gateway
-    ↓
-Multi-server Router
-    ↓
-Context-aware Gateway
-    ↓
-Policy + Governance
-    ↓
-Resilient Gateway
-    ↓
-Observable Platform
-    ↓
-Production-grade MCP Infrastructure
+Install the independent SDK fixtures once:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r tests/interop/requirements.txt
 ```
 
-The objective is to make the final system useful not only as an MCP integration layer, but as a **control plane for AI tool access and context flow across distributed services**.
+Start each command in its own terminal:
 
-## Status
+```bash
+.venv/bin/python tests/interop/check.py --server 9001 --json
+.venv/bin/python tests/interop/check.py --server 9002
+go run ./cmd/gateway -config examples/two-servers.json
+```
 
-🚧 **Active development**
+The gateway discovers `json.add`, `json.fail`, `sse.add`, and `sse.fail`, plus `health.check`. `add` takes integer arguments `a` and `b`; `fail` deliberately returns a tool error.
 
-The architecture is established, the core protocol and routing foundations are implemented, and the product is being built incrementally toward the full gateway vision described above.
+Or run the fully automated compatibility check. It starts both fixture servers and the gateway on temporary ports, exercises them with the official SDK client, and cleans up:
+
+```bash
+go build -o gateway ./cmd/gateway
+.venv/bin/python tests/interop/check.py --binary ./gateway
+```
+
+Stop either fixture server and wait for the refresh interval. Its tools disappear; healthy tools remain usable. `/healthz` stays 200 while `/readyz` returns 503 until every configured server is healthy again.
+
+## Configuration and access control
+
+Configuration is strict JSON: unknown fields, duplicate names, invalid limits, and missing credential environment variables fail startup. Check without contacting downstream servers:
+
+```bash
+go run ./cmd/gateway -config examples/two-servers.json -check
+```
+
+See [configuration reference](docs/configuration.md) and [authenticated example](examples/authenticated.json).
+
+```bash
+export GATEWAY_READER_TOKEN="$(openssl rand -hex 32)"
+go run ./cmd/gateway -config examples/authenticated.json
+```
+
+Configure the client to send `Authorization: Bearer <token>`. Credentials are read from environment variables, never literal config values. Upstream client credentials are not forwarded to downstream servers; each downstream may reference its own `tokenEnv`.
+
+The same policy filters `tools/list` and checks `tools/call`. A caller cannot invoke a tool hidden by its policy. Denied calls return an unknown-tool error. Sessions are bound to the authenticated principal.
+
+## Context policies
+
+Context transforms are disabled by default. `context.redactKeys` masks exact, case-insensitive JSON keys in structured output and JSON-encoded text. It does **not** detect arbitrary secrets embedded in prose or images.
+
+`context.maxOutputBytes` bounds the serialized tool result. Oversized output becomes a clearly marked text excerpt; structured/binary content is omitted, and the original `isError` is preserved. `context.maxEstimatedTokens` optionally applies a **bytes/4 heuristic**, not a model-specific tokenizer or a guaranteed token count. If both budgets are set, the tighter limit wins.
+
+No tool content is retained between requests. No LLM summarization or external context service is used. These transforms can change downstream output schemas; clients opting into them must inspect `_meta.gateway.truncated` before using structured output.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    Client["MCP client"] --> Boundary["Authentication, quotas, Origin checks"]
+    Boundary --> Protocol["Sessions and MCP protocol"]
+    Protocol --> Policy["Tool policy and context limits"]
+    Policy --> Catalog["Atomic catalog and routes"]
+    Catalog --> Local["Local executor"]
+    Catalog --> Remote["Deadline, bulkhead, circuit breaker"]
+    Remote --> Servers["Downstream MCP servers"]
+    Refresh["Bounded discovery refresh"] --> Servers
+    Refresh --> Catalog
+```
+
+| Package | Responsibility |
+|---|---|
+| `internal/app` | Configuration-driven composition and lifecycle |
+| `internal/gateway` | Client-facing protocol and sessions |
+| `internal/mcp` | Protocol types and downstream HTTP client |
+| `internal/router` | Atomic catalog, ownership, discovery, routing |
+| `internal/tools` | Local definitions and execution |
+| `internal/validation` | JSON Schema compilation without external references |
+| `internal/policy` | Authentication, tool/server access, quotas |
+| `internal/context` | Optional redaction and context budgets |
+| `internal/resilience` | Downstream concurrency and failure isolation |
+| `internal/observability` | Structured logs and metrics |
+
+## Verification
+
+```bash
+make check
+# or
+go vet ./...
+go build ./...
+go test -race -coverprofile=coverage.out ./...
+```
+
+CI runs these checks plus the official Python SDK interoperability scenario. Tests cover the reported regressions: broken fixtures, lost tool errors, discovery without routes, pagination, JSON/SSE transport, validation, cancellation, partial outage, policy enforcement, circuit recovery, and concurrent registry operations.
+
+See [testing and operations](docs/operations.md) for deployment, readiness, failure exercises, and measurement guidance.
+
+## Deliberate boundaries
+
+- Tools-only gateway. Resources, prompts, sampling, elicitation, and task extensions are not advertised.
+- Client-facing responses use JSON. Downstream SSE responses are consumed, but interrupted streams are not resumed and tool calls are not replayed.
+- Downstream tools are refreshed on an interval or `SIGHUP`; this does not hot-reload configuration or credentials. Restart to change configured servers or credentials.
+- Sessions, quotas, metrics, and catalogs are in memory. Use a single replica or session affinity; restart loses sessions. Distributed quotas and durable audit storage need external infrastructure.
+- Downstream connections use a configured **service identity shared by authorized callers**. Do not use a stateful downstream that stores user-private session data across calls. Separate instances/service credentials are required for that isolation model.
+- Static bearer authentication is intended for service clients or a trusted reverse proxy. OAuth authorization/discovery is not implemented. Terminate TLS before exposing this HTTP listener remotely.
+- No external LLM summarization, semantic context routing, or production throughput claims. Context compression is explicit bounded excerpting.
+- Docker/Kubernetes files are deployment templates. Validate images, TLS, secret management, and resource sizing in your infrastructure.

@@ -1,0 +1,7 @@
+{
+  "listen": "0.0.0.0:8080",
+  "principals": [
+    {"name": "operator", "tokenEnv": "GATEWAY_TOKEN", "allowTools": ["*"], "requestsPerMinute": 600}
+  ],
+  "servers": []
+}

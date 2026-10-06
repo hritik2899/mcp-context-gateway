@@ -1,0 +1,21 @@
+{
+  "listen": "127.0.0.1:8080",
+  "allowedOrigins": [],
+  "principals": [
+    {
+      "name": "reader",
+      "tokenEnv": "GATEWAY_READER_TOKEN",
+      "allowTools": ["health.check", "json.add", "sse.add"],
+      "allowServers": ["local", "json", "sse"],
+      "requestsPerMinute": 120
+    }
+  ],
+  "servers": [
+    {"name": "json", "url": "http://127.0.0.1:9001/mcp", "timeout": "5s", "maxConcurrent": 16},
+    {"name": "sse", "url": "http://127.0.0.1:9002/mcp", "timeout": "5s", "maxConcurrent": 16}
+  ],
+  "context": {
+    "maxOutputBytes": 16384,
+    "redactKeys": ["password", "access_token", "api_key"]
+  }
+}
