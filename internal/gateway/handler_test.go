@@ -60,7 +60,7 @@ func TestProtocolValidation(t *testing.T) {
 		body string
 		code int
 	}{
-		{`{`, mcp.ParseError}, {`[]`, mcp.InvalidRequest}, {`{"jsonrpc":"2.0","id":{},"method":"ping"}`, mcp.InvalidRequest},
+		{`{`, mcp.ParseError}, {`[]`, mcp.InvalidRequest}, {`{"jsonrpc":"2.0","id":null,"method":"ping"}`, mcp.InvalidRequest}, {`{"jsonrpc":"2.0","id":{},"method":"ping"}`, mcp.InvalidRequest},
 		{`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":[]}`, mcp.InvalidParams},
 		{`{"jsonrpc":"2.0","id":2,"method":"unknown"}`, mcp.MethodNotFound},
 	} {
@@ -163,5 +163,50 @@ func TestLargeIntegerArgumentsRetainPrecision(t *testing.T) {
 	w := request(h, sid, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"test","arguments":{"id":9007199254740993}}}`)
 	if !strings.Contains(w.Body.String(), "9007199254740993") {
 		t.Fatal(w.Body.String())
+	}
+}
+
+func TestLargeRequestIDCannotBypassResponseLimit(t *testing.T) {
+	s := &stub{}
+	h := NewHandler(s, s, Options{MaxResponseBytes: 1024})
+	sid := initialize(t, h)
+	body := `{"jsonrpc":"2.0","id":"` + strings.Repeat("x", 4096) + `","method":"ping"}`
+	w := request(h, sid, body)
+	if w.Code != 413 || w.Body.Len() > 1024 {
+		t.Fatalf("oversized response: status=%d bytes=%d", w.Code, w.Body.Len())
+	}
+}
+func TestEquivalentStringIDsCancelAndRejectDuplicateCalls(t *testing.T) {
+	s := &stub{wait: true, started: make(chan struct{})}
+	h := NewHandler(s, s, Options{})
+	sid := initialize(t, h)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- request(h, sid, `{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"test"}}`)
+	}()
+	<-s.started
+	duplicate := request(h, sid, `{"jsonrpc":"2.0","id":"\u0061","method":"ping"}`)
+	if !strings.Contains(duplicate.Body.String(), "duplicate in-flight") {
+		t.Fatal(duplicate.Body.String())
+	}
+	request(h, sid, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"\u0061"}}`)
+	select {
+	case w := <-done:
+		if !strings.Contains(w.Body.String(), "cancelled") {
+			t.Fatal(w.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("escaped cancellation ID was not matched")
+	}
+}
+
+func TestAcceptQualityZeroIsNotSupported(t *testing.T) {
+	for _, quality := range []string{"0", "0.0", "NaN", "2", "invalid"} {
+		if accepts("application/json;q="+quality, "application/json") {
+			t.Fatalf("invalid quality accepted: %s", quality)
+		}
+	}
+	if !accepts("application/json;q=0.5, text/event-stream", "application/json") {
+		t.Fatal("valid quality rejected")
 	}
 }

@@ -20,6 +20,8 @@ Load with `gateway -config path.json`. Omitted fields use defaults. Unknown fiel
 | `principals` | `[]` | Service client policies; empty only allowed on loopback |
 | `context` | disabled | Optional result transforms |
 
+Request IDs are limited to 256 encoded JSON bytes so error responses cannot bypass the configured response-size limit. Requests with larger IDs receive HTTP 413. String IDs are compared by value, including equivalent JSON escape spellings.
+
 Server entries:
 
 ```json

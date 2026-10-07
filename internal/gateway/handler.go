@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,19 +71,45 @@ func NewHandler(c Catalog, e Executor, o Options) *Handler {
 	return &Handler{catalog: c, executor: e, options: o, sessions: map[string]*session{}}
 }
 
+// Bound echoed IDs independently of the larger tool-argument body budget.
+const maxRequestIDBytes = 256
+
 var numberID = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
 
 func validID(id json.RawMessage) bool {
+	id = bytes.TrimSpace(id)
 	if len(id) == 0 {
 		return false
 	}
-	var text string
-	return json.Unmarshal(id, &text) == nil || numberID.Match(bytes.TrimSpace(id))
+	if id[0] == '"' {
+		var value string
+		return json.Unmarshal(id, &value) == nil
+	}
+	return numberID.Match(id)
+}
+
+// JSON string IDs are compared by value, not by their escape spelling.
+func requestKey(id json.RawMessage) string {
+	var value string
+	if json.Unmarshal(id, &value) == nil {
+		return "s:" + value
+	}
+	value = string(bytes.TrimSpace(id))
+	if value == "-0" {
+		value = "0"
+	}
+	return "n:" + value
 }
 func accepts(header, media string) bool {
 	for _, part := range strings.Split(header, ",") {
 		kind, params, err := mime.ParseMediaType(strings.TrimSpace(part))
-		if err == nil && kind == media && params["q"] != "0" {
+		if err == nil && kind == media {
+			if q, ok := params["q"]; ok {
+				quality, err := strconv.ParseFloat(q, 64)
+				if err != nil || !(quality > 0 && quality <= 1) {
+					continue
+				}
+			}
 			return true
 		}
 	}
@@ -92,6 +119,10 @@ func (h *Handler) write(w http.ResponseWriter, id json.RawMessage, result any, r
 	data, err := json.Marshal(mcp.JSONRPCResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr})
 	if err != nil || len(data) > int(h.options.MaxResponseBytes) {
 		data, _ = json.Marshal(mcp.JSONRPCResponse{JSONRPC: "2.0", ID: id, Error: &mcp.JSONRPCError{Code: mcp.InternalError, Message: "result cannot be encoded within the response limit"}})
+	}
+	if len(data) > int(h.options.MaxResponseBytes) {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
@@ -146,6 +177,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, nil, mcp.InvalidRequest, "invalid JSON-RPC request")
 		return
 	}
+	if len(request.ID) > maxRequestIDBytes {
+		http.Error(w, "request id exceeds 256 bytes", http.StatusRequestEntityTooLarge)
+		return
+	}
 	if len(request.ID) > 0 && !validID(request.ID) {
 		h.fail(w, nil, mcp.InvalidRequest, "id must be a string or integer")
 		return
@@ -180,8 +215,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var p struct {
 				RequestID json.RawMessage `json:"requestId"`
 			}
-			if json.Unmarshal(request.Params, &p) == nil {
-				if cancel := s.active[string(p.RequestID)]; cancel != nil {
+			if json.Unmarshal(request.Params, &p) == nil && validID(p.RequestID) {
+				if cancel := s.active[requestKey(p.RequestID)]; cancel != nil {
 					cancel()
 				}
 			}
@@ -195,7 +230,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, request.ID, mcp.InvalidRequest, "session is not initialized")
 		return
 	}
-	key := string(request.ID)
+	key := requestKey(request.ID)
 	if _, exists := s.active[key]; exists {
 		h.mu.Unlock()
 		h.fail(w, request.ID, mcp.InvalidRequest, "duplicate in-flight request id")
