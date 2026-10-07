@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
 // Executor executes a registered tool by name.
@@ -15,6 +16,7 @@ type Handler func(context.Context, map[string]any) (any, error)
 
 // LocalExecutor keeps tool execution separate from tool discovery.
 type LocalExecutor struct {
+	mu       sync.RWMutex
 	registry *Registry
 	handlers map[string]Handler
 }
@@ -30,6 +32,8 @@ func (e *LocalExecutor) Register(name string, handler Handler) error {
 	if handler == nil {
 		return fmt.Errorf("handler for tool %q is required", name)
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if _, exists := e.handlers[name]; exists {
 		return fmt.Errorf("handler for tool %q is already registered", name)
 	}
@@ -41,7 +45,9 @@ func (e *LocalExecutor) Execute(ctx context.Context, name string, arguments map[
 	if _, ok := e.registry.Lookup(name); !ok {
 		return nil, fmt.Errorf("tool %q is not registered", name)
 	}
+	e.mu.RLock()
 	handler, ok := e.handlers[name]
+	e.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("tool %q has no executor", name)
 	}

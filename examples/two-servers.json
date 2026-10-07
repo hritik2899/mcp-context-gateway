@@ -1,0 +1,10 @@
+{
+  "listen": "127.0.0.1:8080",
+  "requestTimeout": "30s",
+  "discoveryTimeout": "5s",
+  "refreshInterval": "15s",
+  "servers": [
+    {"name": "json", "url": "http://127.0.0.1:9001/mcp", "timeout": "5s"},
+    {"name": "sse", "url": "http://127.0.0.1:9002/mcp", "timeout": "5s"}
+  ]
+}

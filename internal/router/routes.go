@@ -13,8 +13,8 @@ const (
 )
 
 type ToolRoute struct {
-	ToolName  string
-	Backend   Backend
+	ToolName   string
+	Backend    Backend
 	ServerName string
 }
 

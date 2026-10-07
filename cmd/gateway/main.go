@@ -2,141 +2,78 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"log"
+	"errors"
+	"flag"
+	"github.com/hritik2899/mcp-context-gateway/internal/app"
+	"github.com/hritik2899/mcp-context-gateway/internal/config"
+	"log/slog"
 	"net/http"
-
-	"github.com/hritik2899/mcp-context-gateway/internal/mcp"
-	"github.com/hritik2899/mcp-context-gateway/internal/router"
-	"github.com/hritik2899/mcp-context-gateway/internal/tools"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
-const serverVersion = "0.1.0"
-
 func main() {
-	registry := tools.NewRegistry()
-	_ = registry.Register(tools.Definition{
-		Name:        "health.check",
-		Description: "Returns the gateway health status.",
-		InputSchema: map[string]any{"type": "object"},
-	})
-
-	executor := tools.NewLocalExecutor(registry)
-	_ = executor.Register("health.check", func(ctx context.Context, arguments map[string]any) (any, error) {
-		return map[string]any{"status": "ok"}, nil
-	})
-
-	routes := router.NewRouteRegistry()
-	if err := routes.Register(router.ToolRoute{ToolName: "health.check", Backend: router.BackendLocal}); err != nil {
-		log.Fatal(err)
-	}
-
-	servers := router.NewServerRegistry()
-	executionRouter := router.New(executor, routes, servers)
-	catalog := router.NewCatalog(registry, router.NewDiscovery(servers))
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"ok"}`)
-	})
-	mux.HandleFunc("POST /mcp", func(w http.ResponseWriter, r *http.Request) {
-		handleMCP(w, r, registry, catalog, executionRouter)
-	})
-
-	server := &http.Server{Addr: ":8080", Handler: mux}
-	log.Printf("mcp-context-gateway listening on %s", server.Addr)
-	log.Fatal(server.ListenAndServe())
-}
-
-func handleMCP(w http.ResponseWriter, r *http.Request, registry *tools.Registry, catalog *router.Catalog, executionRouter router.Route) {
-	var request mcp.JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeJSONRPCError(w, nil, mcp.InvalidRequest, "invalid JSON-RPC request")
-		return
-	}
-	if request.JSONRPC != "2.0" || request.Method == "" {
-		writeJSONRPCError(w, request.ID, mcp.InvalidRequest, "invalid JSON-RPC request")
-		return
-	}
-
-	switch request.Method {
-	case mcp.InitializeMethod:
-		handleInitialize(w, request, registry)
-	case mcp.InitializedNotification:
-		w.WriteHeader(http.StatusAccepted)
-	case mcp.ToolsListMethod:
-		handleToolsList(w, r.Context(), request, catalog)
-	case mcp.ToolsCallMethod:
-		handleToolCall(w, r, request, executionRouter)
-	default:
-		if len(request.ID) == 0 {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		if request.Method == "ping" {
-			writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{}})
-			return
-		}
-		writeJSONRPCError(w, request.ID, mcp.MethodNotFound, "method not found")
+	if err := run(); err != nil {
+		slog.Error("gateway stopped", "error", err)
+		os.Exit(1)
 	}
 }
-
-func handleToolsList(w http.ResponseWriter, ctx context.Context, request mcp.JSONRPCRequest, catalog *router.Catalog) {
-	tools, err := catalog.List(ctx)
+func run() error {
+	filename := flag.String("config", "", "path to JSON configuration")
+	check := flag.Bool("check", false, "validate configuration and exit")
+	flag.Parse()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
+	c, err := config.Load(*filename)
 	if err != nil {
-		writeJSONRPCError(w, request.ID, mcp.InternalError, err.Error())
-		return
+		return err
 	}
-	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: mcp.ToolsListResult{Tools: tools}})
-}
-
-func handleToolCall(w http.ResponseWriter, r *http.Request, request mcp.JSONRPCRequest, executionRouter router.Route) {
-	var params mcp.CallToolParams
-	if err := json.Unmarshal(request.Params, &params); err != nil || params.Name == "" {
-		writeJSONRPCError(w, request.ID, mcp.InvalidParams, "tool name is required")
-		return
+	if *check {
+		logger.Info("configuration valid")
+		return nil
 	}
-
-	result, err := executionRouter.Execute(r.Context(), params.Name, params.Arguments)
+	application, err := app.New(context.Background(), c, logger)
 	if err != nil {
-		writeJSONRPCError(w, request.ID, mcp.InternalError, err.Error())
-		return
+		return err
 	}
-
-	content, ok := result.(map[string]any)
-	if !ok {
-		content = map[string]any{"result": result}
+	server := &http.Server{Addr: c.Listen, Handler: application.Handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: c.RequestTimeout.Value() + 2*time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	errorsCh := make(chan error, 1)
+	go func() { logger.Info("gateway listening", "address", c.Listen); errorsCh <- server.ListenAndServe() }()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	var serveErr error
+running:
+	for {
+		select {
+		case serveErr = <-errorsCh:
+			break running
+		case sig := <-signals:
+			if sig == syscall.SIGHUP {
+				ctx, cancel := context.WithTimeout(context.Background(), c.DiscoveryTimeout.Value())
+				err := application.Catalog.Refresh(ctx)
+				cancel()
+				if err != nil {
+					logger.Warn("discovery refresh failed")
+				}
+				continue
+			}
+			break running
+		}
 	}
-	text, _ := json.Marshal(content)
-	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: string(text)}}}})
-}
-
-func handleInitialize(w http.ResponseWriter, request mcp.JSONRPCRequest, registry *tools.Registry) {
-	var params mcp.InitializeParams
-	if err := json.Unmarshal(request.Params, &params); err != nil {
-		writeJSONRPCError(w, request.ID, mcp.InvalidParams, "invalid initialize parameters")
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), c.ShutdownTimeout.Value())
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		server.Close()
+		logger.Warn("HTTP shutdown grace expired")
 	}
-	if params.ProtocolVersion == "" || params.ClientInfo.Name == "" {
-		writeJSONRPCError(w, request.ID, mcp.InvalidParams, "protocolVersion and clientInfo are required")
-		return
+	if err := application.Close(ctx); err != nil {
+		logger.Warn("downstream session cleanup incomplete")
 	}
-
-	capabilities := map[string]any{}
-	if len(registry.List()) > 0 {
-		capabilities["tools"] = map[string]any{}
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		return nil
 	}
-	result := mcp.InitializeResult{ProtocolVersion: params.ProtocolVersion, Capabilities: capabilities, ServerInfo: mcp.ServerInfo{Name: "mcp-context-gateway", Version: serverVersion}}
-	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
-}
-
-func writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
-	writeJSON(w, mcp.JSONRPCResponse{JSONRPC: "2.0", ID: id, Error: &mcp.JSONRPCError{Code: code, Message: message}})
-}
-
-func writeJSON(w http.ResponseWriter, response mcp.JSONRPCResponse) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
+	return serveErr
 }

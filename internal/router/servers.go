@@ -48,3 +48,11 @@ func (r *ServerRegistry) Lookup(name string) (Server, bool) {
 	server, ok := r.servers[name]
 	return server, ok
 }
+
+func (r *ServerRegistry) Remove(name string) (Server, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	server, ok := r.servers[name]
+	delete(r.servers, name)
+	return server, ok
+}

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -31,13 +32,21 @@ func (r *Registry) Register(definition Definition) error {
 		return fmt.Errorf("tool %q input schema is required", definition.Name)
 	}
 
+	data, err := json.Marshal(definition)
+	if err != nil {
+		return fmt.Errorf("invalid tool schema: %w", err)
+	}
+	var copied Definition
+	if err := json.Unmarshal(data, &copied); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if _, exists := r.tools[definition.Name]; exists {
 		return fmt.Errorf("tool %q is already registered", definition.Name)
 	}
-	r.tools[definition.Name] = definition
+	r.tools[definition.Name] = copied
 	return nil
 }
 
@@ -46,7 +55,7 @@ func (r *Registry) Lookup(name string) (Definition, bool) {
 	defer r.mu.RUnlock()
 
 	definition, ok := r.tools[name]
-	return definition, ok
+	return cloneDefinition(definition), ok
 }
 
 func (r *Registry) List() []Definition {
@@ -55,10 +64,17 @@ func (r *Registry) List() []Definition {
 
 	definitions := make([]Definition, 0, len(r.tools))
 	for _, definition := range r.tools {
-		definitions = append(definitions, definition)
+		definitions = append(definitions, cloneDefinition(definition))
 	}
 	sort.Slice(definitions, func(i, j int) bool {
 		return definitions[i].Name < definitions[j].Name
 	})
 	return definitions
+}
+
+func cloneDefinition(definition Definition) Definition {
+	data, _ := json.Marshal(definition)
+	var result Definition
+	json.Unmarshal(data, &result)
+	return result
 }
