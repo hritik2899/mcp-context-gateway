@@ -124,7 +124,7 @@ go build ./...
 go test -race -coverprofile=coverage.out ./...
 ```
 
-CI runs these checks plus the official Python SDK interoperability scenario. Tests cover the reported regressions: broken fixtures, lost tool errors, discovery without routes, pagination, JSON/SSE transport, validation, cancellation, partial outage, policy enforcement, circuit recovery, and concurrent registry operations.
+CI runs these checks, the official Python SDK interoperability scenario, and an authenticated non-root container smoke test. Tests cover the reported regressions: broken fixtures, lost tool errors, discovery without routes, pagination, JSON/SSE transport, validation, cancellation, partial outage, policy enforcement, circuit recovery, and concurrent registry operations.
 
 See [testing and operations](docs/operations.md) for deployment, readiness, failure exercises, and measurement guidance.
 
@@ -137,4 +137,4 @@ See [testing and operations](docs/operations.md) for deployment, readiness, fail
 - Downstream connections use a configured **service identity shared by authorized callers**. Do not use a stateful downstream that stores user-private session data across calls. Separate instances/service credentials are required for that isolation model.
 - Static bearer authentication is intended for service clients or a trusted reverse proxy. OAuth authorization/discovery is not implemented. Terminate TLS before exposing this HTTP listener remotely.
 - No external LLM summarization, semantic context routing, or production throughput claims. Context compression is explicit bounded excerpting.
-- Docker/Kubernetes files are deployment templates. Validate images, TLS, secret management, and resource sizing in your infrastructure.
+- CI builds and exercises the Docker image. Kubernetes remains a deployment template; validate TLS, secret management, and resource sizing in your infrastructure.

@@ -37,7 +37,7 @@ docker run --rm -p 127.0.0.1:8080:8080 \
 
 The image runs as a non-root user with a static Go binary. Its default config exposes only `health.check`. Mount a custom file at `/etc/gateway/config.json` to configure downstreams. Container-local `127.0.0.1` refers to the container itself, not the host or another container.
 
-Build with a supported patched Go release (`--build-arg GO_VERSION=<version>`) and pin image digests in your release pipeline. The Dockerfile is provided for deployment; building/publishing images is separate from running Go tests.
+Build with a supported patched Go release (`--build-arg GO_VERSION=<version>`) and pin image digests in your release pipeline. CI builds the Dockerfile and runs `python3 tests/container/check.py --image mcp-context-gateway:ci`. The smoke test verifies a non-root process with a read-only filesystem, liveness/readiness, authentication, Origin rejection, MCP initialization and tool execution, and metrics. Publishing images and deploying Kubernetes remain separate operator actions.
 
 ## Kubernetes template
 
