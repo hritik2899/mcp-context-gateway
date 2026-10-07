@@ -1,9 +1,10 @@
 name: CI
 on:
   push:
+    branches: [main]
   pull_request:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 permissions:
   contents: read
